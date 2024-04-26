@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "crcTest"
+		},
+		{
+			"path": "nanoChannelTester"
+		},
+		{
+			"path": "resources"
+		},
+		{
+			"path": "serialMaster"
+		},
+		{
+			"path": "serialSlave"
+		}
+	]
+}
