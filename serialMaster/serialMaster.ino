@@ -51,6 +51,8 @@ const uint8_t COMMON_CRC_ERROR_HANDLE_WIDTH = strlen(COMMON_CRC_ERROR_HANDLE);
 const char * COMMON_DATA_FORMAT_REMINDER = "Ensure your configuration data is formatted as follows:\n";
 const char * COMMON_DATA_FORMAT_EXAMPLE = "duration/data_len_bytes/count_mode/data/baud/transaction_delay_ms/CRC\n";
 
+uint8_t rxBytes[MAX_MESSAGE_LENGTH];
+
 typedef enum {
   FAIL,
   PASS
@@ -147,7 +149,6 @@ void loop() {
   
   // New test configuration parameters
   char message[MAX_MESSAGE_LENGTH]; // Declare message locally within the loop function. Allocate MAX_MESSAGE_LENGTH + 1 byte for null char to be appended after data reception.
-  uint8_t rxBytes[MAX_MESSAGE_LENGTH];
   uint8_t msg_len = 0;
   uint32_t count = 0;
   uint32_t failCount = 0;
@@ -164,8 +165,6 @@ void loop() {
   char newTest_buff[MAX_MESSAGE_LENGTH];
   char newTest_buff_no_crc[MAX_MESSAGE_LENGTH];
   char * newTest_cfg_buff[NUM_CFG_OPTS + 1];
-  char * ptr = NULL;
-  char nextChar;
 
   // ======== MATLAB TEST CONFIG RETRIEVAL LOOP (CRC CHECK, DATA VALIDITY CHECK) (TEST_WAITING STATE) ======== //
   while (newTestState != TEST_READY) {
@@ -409,17 +408,11 @@ void loop() {
       // Read them out and process the data
       uint8_t num_bytes = 0;
       uint8_t xByte;
-      while (num_bytes < msg_len) {
-          if (TestChannel.available() > 0) {
-              xByte = TestChannel.read(); // Read the incoming byte
-              rxBytes[num_bytes] = xByte; // Store the byte in the buffer
-              num_bytes++; // Increment byte count
-
-              // Break if num_bytes exceeds msg_len
-              if (num_bytes >= msg_len) {
-                  break;
-              }
-          }
+      while (num_bytes < msg_len && num_bytes < newTest.data_len_bytes) {
+          xByte = TestChannel.read(); // Read the incoming byte
+          Serial.println(xByte);
+          rxBytes[num_bytes] = xByte; // Store the byte in the buffer
+          num_bytes++; // Increment byte count
       }
 
       if (VERBOSE) {
@@ -428,10 +421,13 @@ void loop() {
         Serial.print(") RX : ");
         //app_serial_print_bytes(rxBytes, msg_len);
         // Print received bytes if needed
-        //for (int i = 0; i < msg_len; i++) {
-            //Serial.write(rxBytes[i]);
+        for (int i = 0; i < msg_len; i++) {
+            //Serial.print(rxBytes[i], HEX);
             //Serial.print(rxBytes[i] + 0x30);
-        //}
+            //Serial.print((char)rxBytes[i]);
+            //Serial.print((int)rxBytes[i]);
+        }
+        
         //Serial.println();
         Serial.println();
       }
