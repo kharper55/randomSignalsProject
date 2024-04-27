@@ -1,8 +1,9 @@
 %%change all integer formatting to use hex base
-data = '6500/8/0/A5A5A5A5/58600/0'; %% 
+%data = '6500/8/0/A5A5A5A5/58600/0'; %% 
 %% 6500/8/0/A5A5A5A5/58600/0/8C30
 %data = '10000/4/0/5555/115200/10/4FD8'; %%    Example data + correct checksum per CRC16 CITT via 'A001' opolynomial
 %data = '10000/4/0/5555/115200/10';
+data = '10000/8/0/A5A5A5A5/115200/0';
 crc = computeCRC(data);
 disp(['CRC16 checksum for "', data, '" is ', dec2hex(crc)]);
 
@@ -10,7 +11,6 @@ disp(['CRC16 checksum for "', data, '" is ', dec2hex(crc)]);
 newData = strcat(data, '/', dec2hex(crc));
 % Display the new string
 fprintf('New data with CRC: %s\n', newData);
-
 
 function crc = computeCRC(data)
     crc = uint16(hex2dec('FFFF')); % Initial value

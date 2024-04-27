@@ -1,6 +1,8 @@
 // ============================================================================================================================= //
+// The Arduino Nano features an ATMEga328P 8-bit microcontroller. See below for the datasheet
+// https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/ATmega48A-PA-88A-PA-168A-PA-328-P-DS-DS40002061B.pdf
 
-///6500/8/0/A5A5A5A5/58600/0/8C30
+//6500/8/0/A5A5A5A5/58600/0/8C30
 #include <SoftwareSerial.h>
 #include <util/crc16.h>               // Used for confirmation of SOFTUART test config data. HW UART connection to MATLAB is assumed stable
 #include <stdlib.h>                   // For strtoi
@@ -51,7 +53,7 @@ const uint8_t COMMON_CRC_ERROR_HANDLE_WIDTH = strlen(COMMON_CRC_ERROR_HANDLE);
 const char * COMMON_DATA_FORMAT_REMINDER = "Ensure your configuration data is formatted as follows:\n";
 const char * COMMON_DATA_FORMAT_EXAMPLE = "duration/data_len_bytes/count_mode/data/baud/transaction_delay_ms/CRC\n";
 
-uint8_t rxBytes[MAX_MESSAGE_LENGTH];
+byte rxBytes[MAX_MESSAGE_LENGTH];
 
 typedef enum {
   FAIL,
@@ -84,9 +86,9 @@ struct byte_err_t {
 struct transaction_err_t {
   uint16_t transaction_num;       // Transaction number out of total specified transactions
   uint32_t time_ms;               // Time of occurence relative to transaction start
-  uint8_t transaction_len_bytes;  // Length in bytes of the transaction
+  uint8_t data_len_bytes;  // Length in bytes of the transaction
   transaction_result_t result;    // Enum type. 0 == FAIL, 1 == PASS
-  byte_err_t byte_err[];          // An array of structs which hold classifying information per the byte errors
+  byte_err_t * byte_err;          // An array of structs which hold classifying information per the byte errors
 };
 
 // Rcv formatted from MATLAB, pass to slave at beginning of test. use data locally to stop test
@@ -145,6 +147,8 @@ void loop() {
   transaction_result_t result = PASS;
   test_state_t newTestState = TEST_WAITING;
   initializeConfig(&newTest);
+  byte_err_t byte_err;
+  transaction_err_t transaction_result;
   int timeout_count = 0;
   
   // New test configuration parameters
@@ -387,59 +391,88 @@ void loop() {
   // Kick the test off
   count = 0;
   Serial.println("Starting test...");
+  
+  
+  initializeTransaction(&transaction_result, &newTest);
+  initializeByteError(&byte_err);
+  t_start = millis();
   newTestState = TEST_RUNNING;
   
   while (newTestState != TEST_DONE) {
+
+    transaction_result.result = PASS; // only updated if a failure occurs
 
     // Tell the slave it can send data
     signifySoftUART_READY();
 
     // Wait for the slave to signal that it has completed its transfer
-    // The slave will drive this signal high when it has finished its transfer
     while (!interruptOccurred) {};
     signifySoftUART_NOT_READY();
+
+    // Grab number of bytes received
     msg_len = TestChannel.available();
 
     if (msg_len) { // Bytes have appeared in the peripheral buffer -- read them out and check for errors, classify the errors, and report to MATLAB
-      //app_serial_read(message, msg_len);
-      //app_serial_read_bytes(rxBytes, msg_len);
-
-      // Bytes have appeared in the peripheral buffer
-      // Read them out and process the data
-      uint8_t num_bytes = 0;
-      uint8_t xByte;
-      while (num_bytes < msg_len && num_bytes < newTest.data_len_bytes) {
-          xByte = TestChannel.read(); // Read the incoming byte
-          Serial.println(xByte);
-          rxBytes[num_bytes] = xByte; // Store the byte in the buffer
-          num_bytes++; // Increment byte count
-      }
+      
+      transaction_result.transaction_num = count;
+      transaction_result.time_ms = millis() - t_start;
 
       if (VERBOSE) {
         Serial.print("(");
         Serial.print(count);    // Expected value
         Serial.print(") RX : ");
-        //app_serial_print_bytes(rxBytes, msg_len);
-        // Print received bytes if needed
-        for (int i = 0; i < msg_len; i++) {
-            //Serial.print(rxBytes[i], HEX);
-            //Serial.print(rxBytes[i] + 0x30);
-            //Serial.print((char)rxBytes[i]);
-            //Serial.print((int)rxBytes[i]);
-        }
-        
-        //Serial.println();
-        Serial.println();
       }
+
+      // CLASSIFY TRANSACTION RESULTS
+      // Bytes have appeared in the peripheral buffer. Process them and populate transaction_byte_len byte_err_t's
+      uint8_t num_bytes = 0;
+      byte xByte;
+      while (num_bytes < msg_len && num_bytes < newTest.data_len_bytes) {
+          xByte = TestChannel.read(); // Read the incoming byte
+          
+          byte_err.data = (uint8_t)xByte;
+
+          //Serial.println((byte)byte_err.data);
+          
+          if (VERBOSE) {
+            Serial.print(xByte);
+          }
+          
+          if (!(newTest.data[newTest.data_len_bytes - num_bytes - 1] == xByte)) { // This line compares the bytes read in to the bytes that are in the test cfg data buffer, in reverse order
+            // Byte mistmatch detected!
+            if (VERBOSE) {
+                Serial.print("MISMATCH");
+            }
+            uint8_t err_bits = newTest.data[newTest.data_len_bytes - num_bytes - 1] ^ xByte;
+            byte_err.bad_bits_mask = err_bits;
+            // err_bis holds a binary uint8_t representing all the bad bits
+            Serial.print(err_bits);
+          }
+          else {
+            byte_err.bad_bits_mask = 0;
+          }
+
+          // Append byte error results to transaction err struct
+          
+          //transaction_result.byte_err[newTest.data_len_bytes - num_bytes - 1] = byte_err;
+          
+          num_bytes++; // Increment byte count
+      }
+      Serial.println();
       
       // Check if the incorrect bytes were read
       //result = (atoi(message) == count - 1) ? PASS : FAIL;
-      if (result == FAIL) failCount++;
+      if (result == FAIL) {
+        transaction_result.result = FAIL;
+        failCount++;
+      }
     }
-    
-    
+        
     else { // No bytes were read, despite the slave indicating it has sent more data (having toggled the softUART_DONE signal)
-      if (count != 0) failCount++;
+      if (count != 0) {
+        transaction_result.result = FAIL;
+        failCount++;
+      }
     }
 
     // Send newest info to MATLAB
@@ -447,7 +480,7 @@ void loop() {
      * Serial.println()
      * 
      */
-    
+    //printTransaction(&transaction_result);
     count++;                   // Increment the test count
     toggleHeartbeat();         // Toggle the heartbeat for a visual indication of the running test
     interruptOccurred = false; // Reset the interrupt flag
@@ -543,34 +576,6 @@ void app_serial_read(char * buff, uint8_t msg_len) {
 }
 
 // ============================================================================================================================= //
-void app_serial_read_bytes(uint8_t * buff, uint8_t msg_len) {
-  uint8_t num_bytes = 0;
-  uint8_t xByte;
-
-  while (num_bytes < msg_len) {
-    // Check if there are bytes available to read
-    if (TestChannel.available() > 0) {
-      // Read the incoming byte
-      xByte = TestChannel.read();
-      
-      // Store the byte in the buffer
-      buff[num_bytes] = xByte;
-      
-      // Increment byte count
-      num_bytes++;
-    }
-  }
-}
-
-// ============================================================================================================================= //
-void app_serial_print_bytes(uint8_t bytes[], uint8_t numBytes) {
-  for(int i = 0; i < numBytes; i++) {
-    Serial.write(bytes[i]);
-  }
-  Serial.println();
-}
-
-// ============================================================================================================================= //
 void app_serial_buffer_console(uint8_t numColumns, const char delim) {
   for(int i = 0; i < numColumns; i++) {
     Serial.print(delim);
@@ -655,31 +660,72 @@ void initializeConfig(uart_test_cfg_t * cfg) {
 }
 
 // ============================================================================================================================= //
+void initializeTransaction(transaction_err_t * transaction, uart_test_cfg_t * cfg) {
+    transaction->transaction_num = 0;
+    transaction->time_ms = 0;
+    transaction->data_len_bytes = cfg->data_len_bytes;
+    transaction->result = PASS; // Initialize data array to an empty string
+    transaction->byte_err = nullptr;
+}
+
+// ============================================================================================================================= //
+void initializeByteError(byte_err_t * byte_err) {
+    byte_err->data = 0;
+    byte_err->bad_bits_mask = 0;
+}
+
+// ============================================================================================================================= //
 void printTestConfig(uart_test_cfg_t * cfg) {
-    Serial.println("======== Test Configuration ========");
-    Serial.print("Duration               : ");
-    Serial.println(cfg->duration);
-    Serial.print("Data length (bytes)    : ");
-    Serial.println(cfg->data_len_bytes);
-    Serial.print("Count mode             : ");
-    Serial.println(cfg->count_mode);
-    // KNOWN ISSUE: IMPORPER STRING TERMINATION FOR BUFF HERE, RESULTING IN ODD PRINTS TO CONSOLE. BUT DATA LOOKS OK 
-    Serial.print("Transaction data       : ");
-    //uIntArrayToCStr(cfg->data, buff, cfg->data_len_bytes);
-    Serial.print("[");
-    for (size_t i = 0; i < cfg->data_len_bytes; i++) {
-        Serial.print((char)(cfg->data[i]));
-        if (i < cfg->data_len_bytes - 1) {
-            Serial.print(", ");
-        }
-    }
-    Serial.println("]");
-    //Serial.println(buff);
-    Serial.print("Baud rate              : ");
-    Serial.println(cfg->baud);
-    Serial.print("Transaction delay (ms) : ");
-    Serial.println(cfg->transaction_delay_ms);
-    Serial.println();
+  Serial.println("======== Test Configuration ========");
+  Serial.print("Duration               : ");
+  Serial.println(cfg->duration);
+  Serial.print("Data length (bytes)    : ");
+  Serial.println(cfg->data_len_bytes);
+  Serial.print("Count mode             : ");
+  Serial.println(cfg->count_mode);
+  // KNOWN ISSUE: IMPORPER STRING TERMINATION FOR BUFF HERE, RESULTING IN ODD PRINTS TO CONSOLE. BUT DATA LOOKS OK 
+  Serial.print("Transaction data       : ");
+  //uIntArrayToCStr(cfg->data, buff, cfg->data_len_bytes);
+  Serial.print("[");
+  for (size_t i = 0; i < cfg->data_len_bytes; i++) {
+      Serial.print((char)(cfg->data[i]));
+      if (i < cfg->data_len_bytes - 1) {
+          Serial.print(", ");
+      }
+  }
+  Serial.println("]");
+  //Serial.println(buff);
+  Serial.print("Baud rate              : ");
+  Serial.println(cfg->baud);
+  Serial.print("Transaction delay (ms) : ");
+  Serial.println(cfg->transaction_delay_ms);
+  Serial.println();
+}
+
+void printTransaction(transaction_err_t * transaction) {
+  Serial.println("======== Transaction Info ========");
+  Serial.print("Transaction #       : ");
+  Serial.println(transaction->transaction_num);
+  Serial.print("Time (ms)           : ");
+  Serial.println(transaction->time_ms);
+  Serial.print("Data length (bytes) : ");
+  Serial.println(transaction->data_len_bytes);
+  Serial.print("Result              : ");
+  Serial.println(msg_err_names[(int)transaction->result]);
+  Serial.print("Byte err            : ");
+  /*
+   * for (int i = 0; i < transaction->data_len_bytes; i++) {
+    Serial.print("Byte ");
+    Serial.print(i);
+    Serial.print(" - Data: ");
+    Serial.print(transaction->byte_err[i].data);
+    Serial.print(", Bad Bits Mask: ");
+    Serial.println(transaction->byte_err[i].bad_bits_mask, BIN);
+  }
+   */
+  // Loop through and print all byte errors. Write a function that prints a single byte err
+  Serial.println("dummy");
+  Serial.println();
 }
 
 // ============================================================================================================================= //
