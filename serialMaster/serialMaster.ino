@@ -1,4 +1,6 @@
 // ============================================================================================================================= //
+
+///6500/8/0/A5A5A5A5/58600/0/8C30
 #include <SoftwareSerial.h>
 #include <util/crc16.h>               // Used for confirmation of SOFTUART test config data. HW UART connection to MATLAB is assumed stable
 #include <stdlib.h>                   // For strtoi
@@ -34,6 +36,8 @@ SoftwareSerial TestChannel(SOFTUART0_RX_PIN, SOFTUART0_TX_PIN);
 const char STOP_CHAR = '\n';
 const char DELIM_CHAR = '/';
 const bool VERBOSE = true;
+const char * COMMON_WARNING_HANDLE = "\nWARNING: ";
+const uint8_t COMMON_WARNING_HANDLE_WIDTH = strlen(COMMON_WARNING_HANDLE) - 1; // account for \n
 const char * COMMON_TIMEOUT_ELAPSED_HANDLE = "\nTIMEOUT: ";
 const uint8_t COMMON_TIMEOUT_ELAPSED_HANDLE_WIDTH = strlen(COMMON_TIMEOUT_ELAPSED_HANDLE) - 1; // account for \n
 const char * COMMON_TIMEOUT_ELAPSED_MSG = "Timeout occurred... Please verify your connections.";
@@ -46,29 +50,6 @@ const char * COMMON_CRC_ERROR_HANDLE = "CRC_ERROR: ";
 const uint8_t COMMON_CRC_ERROR_HANDLE_WIDTH = strlen(COMMON_CRC_ERROR_HANDLE);
 const char * COMMON_DATA_FORMAT_REMINDER = "Ensure your configuration data is formatted as follows:\n";
 const char * COMMON_DATA_FORMAT_EXAMPLE = "duration/data_len_bytes/count_mode/data/baud/transaction_delay_ms/CRC\n";
-
-//char test_string[MAX_MESSAGE_LENGTH] = "1000/4/115200/5555/9000000/D8D7"; // rest data with known crc appended. to be replaced with data from matlab
-
-// New test configuration parameters
-char message[MAX_MESSAGE_LENGTH]; // Declare message locally within the loop function. Allocate MAX_MESSAGE_LENGTH + 1 byte for null char to be appended after data reception.
-uint8_t msg_len = 0;
-uint32_t count = 0;
-uint32_t failCount = 0;
-int i = 0; 
-uint8_t buff[4];
-unsigned long t_start = 0;
-bool timeout_flag = false;
-uint16_t localCRC = 0;
-char rx_buff[MAX_MESSAGE_LENGTH];
-uint16_t rxCRC = 0;
-bool invalidData_flag = false;
-bool baud_change_flag = false;
-
-char newTest_buff[MAX_MESSAGE_LENGTH];
-char newTest_buff_no_crc[MAX_MESSAGE_LENGTH];
-char * newTest_cfg_buff[NUM_CFG_OPTS + 1];
-char * ptr = NULL;
-char nextChar;
 
 typedef enum {
   FAIL,
@@ -117,9 +98,6 @@ struct uart_test_cfg_t {
   // MAKE THE ABOVE delay us instead
 };
 
-uart_test_cfg_t newTest;
-transaction_result_t result = PASS;
-
 typedef enum {
   TEST_WAITING,
   TEST_READY,
@@ -161,9 +139,33 @@ void setup() {
 // ============================================================================================================================= //
 void loop() {
 
+  uart_test_cfg_t newTest;
+  transaction_result_t result = PASS;
   test_state_t newTestState = TEST_WAITING;
   initializeConfig(&newTest);
   int timeout_count = 0;
+  
+  // New test configuration parameters
+  char message[MAX_MESSAGE_LENGTH]; // Declare message locally within the loop function. Allocate MAX_MESSAGE_LENGTH + 1 byte for null char to be appended after data reception.
+  uint8_t rxBytes[MAX_MESSAGE_LENGTH];
+  uint8_t msg_len = 0;
+  uint32_t count = 0;
+  uint32_t failCount = 0;
+  int i = 0; 
+  uint8_t buff[4];
+  unsigned long t_start = 0;
+  bool timeout_flag = false;
+  uint16_t localCRC = 0;
+  char rx_buff[MAX_MESSAGE_LENGTH];
+  uint16_t rxCRC = 0;
+  bool invalidData_flag = false;
+  bool baud_change_flag = false;
+  
+  char newTest_buff[MAX_MESSAGE_LENGTH];
+  char newTest_buff_no_crc[MAX_MESSAGE_LENGTH];
+  char * newTest_cfg_buff[NUM_CFG_OPTS + 1];
+  char * ptr = NULL;
+  char nextChar;
 
   // ======== MATLAB TEST CONFIG RETRIEVAL LOOP (CRC CHECK, DATA VALIDITY CHECK) (TEST_WAITING STATE) ======== //
   while (newTestState != TEST_READY) {
@@ -244,9 +246,21 @@ void loop() {
         // Add check here to verify that the length of the data buffer should match data_len_bytes. If not, truncate the data.
         newTest.data_len_bytes = data_len_bytes;
         size_t sizeX = strlen(newTest_cfg_buff[3]);
-        char buff[sizeof(newTest_cfg_buff[3])];
-        cStrToUintArray(newTest_cfg_buff[3], buff, sizeX);
-        newTest.data = buff;
+        if ((uint8_t)sizeX == data_len_bytes) {
+          uint8_t * buff = (uint8_t*)malloc(sizeX); // Allocate memory dynamically
+          if (buff != NULL) {
+              cStrToUintArray(newTest_cfg_buff[3], buff, sizeX); // Copy the data into the dynamically allocated buffer
+              newTest.data = buff; // Assign the pointer to newTest.data
+          } else {
+              // Failed to allocate memory, handle the error
+              Serial.println("Error: Failed to allocate memory for newTest.data");
+          }  
+        }
+        else {
+          Serial.print(COMMON_WARNING_HANDLE);
+          app_serial_buffer_console(COMMON_WARNING_HANDLE_WIDTH, ' ');
+          Serial.println("Transaction data length (bytes) does not match actual length of transaction data.");
+        } 
       }
 
       uint8_t count_mode =  cStrToUint(newTest_cfg_buff[2], 10);
@@ -270,7 +284,7 @@ void loop() {
         invalidData_flag = true;
       }
       else {
-        newTest.baud = baud;
+        newTest.baud = (baud_t)baud;
         if (baud != SOFTUART0_BAUD) {
           if(VERBOSE) {
             Serial.println("Baud change detected!");
@@ -338,9 +352,10 @@ void loop() {
     
     Serial.println("Forwarding new test configuration to slave...");
 
-    t_start = millis();                         // Fetch current time elapsed since runtime inception
+    //t_start = millis();                         // Fetch current time elapsed since runtime inception
     while (!interruptOccurred) {                // Wait for interrupt from slave signifying confirmation that the data has been received and reconfiguration has been performed. Loop will exit automatically once this occurs             
       if ((millis() - t_start >= TIMEOUT_MS * 10) || (timeout_count == 0)) {
+        t_start = millis(); 
         if (timeout_count == 1) {
           Serial.print(COMMON_TIMEOUT_ELAPSED_HANDLE);
           Serial.println(COMMON_TIMEOUT_ELAPSED_MSG);
@@ -356,12 +371,12 @@ void loop() {
         t_start = millis();  
       }
     }
-    interruptOccurred = false; // reset the interrupt flag
-    signifySoftUART_NOT_READY();
+    interruptOccurred = false;    // reset the interrupt flag
+    signifySoftUART_NOT_READY();  // ensure this pin is driven low
         
     // Upon confirmation of the slave's reconfiguration, reconfigure the master for the test, and then advance the test state thru the fsm
     if (baud_change_flag) {
-      Serial.print("\nBaud change detected. Reconfiguring DUT for ");
+      Serial.print("\nReconfiguring DUT for ");
       Serial.print(newTest.baud);
       Serial.println(" baud.\n");
       TestChannel.begin(newTest.baud);
@@ -372,12 +387,9 @@ void loop() {
 
   // Kick the test off
   count = 0;
-  signifySoftUART_NOT_READY();
-  signifySoftUART_READY();
   Serial.println("Starting test...");
   newTestState = TEST_RUNNING;
-
-  //while (count <= newTest.duration) {
+  
   while (newTestState != TEST_DONE) {
 
     // Tell the slave it can send data
@@ -389,17 +401,43 @@ void loop() {
     signifySoftUART_NOT_READY();
     msg_len = TestChannel.available();
 
-    if (msg_len) { // Bytes have appeared in the peripheral buffer -- read them out and check for errors
-      app_serial_read(message, msg_len);
+    if (msg_len) { // Bytes have appeared in the peripheral buffer -- read them out and check for errors, classify the errors, and report to MATLAB
+      //app_serial_read(message, msg_len);
+      //app_serial_read_bytes(rxBytes, msg_len);
+
+      // Bytes have appeared in the peripheral buffer
+      // Read them out and process the data
+      uint8_t num_bytes = 0;
+      uint8_t xByte;
+      while (num_bytes < msg_len) {
+          if (TestChannel.available() > 0) {
+              xByte = TestChannel.read(); // Read the incoming byte
+              rxBytes[num_bytes] = xByte; // Store the byte in the buffer
+              num_bytes++; // Increment byte count
+
+              // Break if num_bytes exceeds msg_len
+              if (num_bytes >= msg_len) {
+                  break;
+              }
+          }
+      }
 
       if (VERBOSE) {
-        Serial.print(count - 1);    // Expected value
-        Serial.print(" : Rx - ");
-        Serial.println(message); // Actual value
+        Serial.print("(");
+        Serial.print(count);    // Expected value
+        Serial.print(") RX : ");
+        //app_serial_print_bytes(rxBytes, msg_len);
+        // Print received bytes if needed
+        //for (int i = 0; i < msg_len; i++) {
+            //Serial.write(rxBytes[i]);
+            //Serial.print(rxBytes[i] + 0x30);
+        //}
+        //Serial.println();
+        Serial.println();
       }
       
       // Check if the incorrect bytes were read
-      result = (atoi(message) == count - 1) ? PASS : FAIL;
+      //result = (atoi(message) == count - 1) ? PASS : FAIL;
       if (result == FAIL) failCount++;
     }
     
@@ -509,6 +547,34 @@ void app_serial_read(char * buff, uint8_t msg_len) {
 }
 
 // ============================================================================================================================= //
+void app_serial_read_bytes(uint8_t * buff, uint8_t msg_len) {
+  uint8_t num_bytes = 0;
+  uint8_t xByte;
+
+  while (num_bytes < msg_len) {
+    // Check if there are bytes available to read
+    if (TestChannel.available() > 0) {
+      // Read the incoming byte
+      xByte = TestChannel.read();
+      
+      // Store the byte in the buffer
+      buff[num_bytes] = xByte;
+      
+      // Increment byte count
+      num_bytes++;
+    }
+  }
+}
+
+// ============================================================================================================================= //
+void app_serial_print_bytes(uint8_t bytes[], uint8_t numBytes) {
+  for(int i = 0; i < numBytes; i++) {
+    Serial.write(bytes[i]);
+  }
+  Serial.println();
+}
+
+// ============================================================================================================================= //
 void app_serial_buffer_console(uint8_t numColumns, const char delim) {
   for(int i = 0; i < numColumns; i++) {
     Serial.print(delim);
@@ -566,7 +632,8 @@ void uIntArrayToCStr(uint8_t * input_data, char * output_ascii, size_t data_size
     }
     temp[data_size] = '\0'; // Null-terminate the string
     //strncpy(temp, output_ascii, strlen(temp)); // Update the const char *
-    output_ascii = temp;
+    //output_ascii = temp;
+    strcpy(output_ascii, temp);
 }
 
 // ============================================================================================================================= //
@@ -587,17 +654,12 @@ void initializeConfig(uart_test_cfg_t * cfg) {
     cfg->data_len_bytes = 0;
     cfg->count_mode = 0;
     cfg->data = nullptr; // Initialize data array to an empty string
-    cfg->baud = 0;
+    cfg->baud = (baud_t)0;
     cfg->transaction_delay_ms = 0;
 }
 
 // ============================================================================================================================= //
 void printTestConfig(uart_test_cfg_t * cfg) {
-    char buff[sizeof(uint32_t) + 1];
-    if (!Serial) {
-      Serial.println("ERROR: Serial object not initialized!"); // ? how do you expect to print to the console upon this error occurring in runtime?
-      return;
-    }
     Serial.println("======== Test Configuration ========");
     Serial.print("Duration               : ");
     Serial.println(cfg->duration);
@@ -607,8 +669,16 @@ void printTestConfig(uart_test_cfg_t * cfg) {
     Serial.println(cfg->count_mode);
     // KNOWN ISSUE: IMPORPER STRING TERMINATION FOR BUFF HERE, RESULTING IN ODD PRINTS TO CONSOLE. BUT DATA LOOKS OK 
     Serial.print("Transaction data       : ");
-    uIntArrayToCStr(cfg->data, buff, cfg->data_len_bytes);
-    Serial.println(buff);
+    //uIntArrayToCStr(cfg->data, buff, cfg->data_len_bytes);
+    Serial.print("[");
+    for (size_t i = 0; i < cfg->data_len_bytes; i++) {
+        Serial.print((char)(cfg->data[i]));
+        if (i < cfg->data_len_bytes - 1) {
+            Serial.print(", ");
+        }
+    }
+    Serial.println("]");
+    //Serial.println(buff);
     Serial.print("Baud rate              : ");
     Serial.println(cfg->baud);
     Serial.print("Transaction delay (ms) : ");

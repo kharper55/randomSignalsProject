@@ -99,6 +99,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(SOFTUART0_RTS_PIN), handleInterrupt, RISING); // Attach interrupt for SOFTUART0_CTS_PIN
   sei(); // enable interupts globally on the chip
 
+  initializeConfig(&newTest);
+
   // UART2 Link to Slave NANO
   SoftSerial.begin(SOFTUART0_BAUD);
   //delay(1);
@@ -113,7 +115,7 @@ void loop() {
     while (!interruptOccurred) {}; // Wait for an interrupt to occur from the master, signifying it has completed the transmission of a config struct
     interruptOccurred = false; //Rst the interrupt flag immediately
     if (SoftSerial.available()) {
-      app_serial_read(&SoftSerial, newTest_buff, SoftSerial.available());
+      app_serial_read(newTest_buff, SoftSerial.available());
 
       if (VERBOSE) {
         Serial.print("RX Data: ");
@@ -127,7 +129,6 @@ void loop() {
       
       // Check transmitted CRC against local computation. If disagreement, request a new set of test configuration data from master by not toggling the interrupt. Data verification for valid integer values has already been performed
       if (localCRC == rxCRC) {
-        
         parseDelimCstr(newTest_buff_no_crc, DELIM_CHAR, newTest_cfg_buff, NUM_CFG_OPTS); // Split transaction string at delimiters
         
         if (VERBOSE) {
@@ -141,20 +142,34 @@ void loop() {
 
         uint32_t duration = cStrToUint(newTest_cfg_buff[0], 10); // Check duration
         newTest.duration = duration;
-        
+
+        /*
         uint8_t data_len_bytes = cStrToUint(newTest_cfg_buff[1], 10);
-        // Add check here to verify that the length of the data buffer should match data_len_bytes. If not, truncate the data.
         newTest.data_len_bytes = data_len_bytes;
         size_t sizeX = strlen(newTest_cfg_buff[3]);
-        char buff[sizeof(newTest_cfg_buff[3])];
-        cStrToUintArray(newTest_cfg_buff[3], buff, sizeX);
-        newTest.data = buff;
-  
+        uint8_t buff2[sizeof(newTest_cfg_buff[3])];
+        cStrToUintArray(newTest_cfg_buff[3], buff2, sizeX);
+        newTest.data = buff2;
+        */
+        //newTest.data[] = {10, 5, 10, 5, 10, 5, 10, 5};
+        uint8_t data_len_bytes = cStrToUint(newTest_cfg_buff[1], 10);
+        newTest.data_len_bytes = data_len_bytes;
+        
+        size_t sizeX = strlen(newTest_cfg_buff[3]);
+        uint8_t* buff2 = (uint8_t*)malloc(sizeX); // Allocate memory dynamically
+        if (buff2 != NULL) {
+            cStrToUintArray(newTest_cfg_buff[3], buff2, sizeX); // Copy the data into the dynamically allocated buffer
+            newTest.data = buff2; // Assign the pointer to newTest.data
+        } else {
+            // Failed to allocate memory, handle the error
+            Serial.println("Error: Failed to allocate memory for newTest.data");
+        }
+
         uint8_t count_mode =  cStrToUint(newTest_cfg_buff[2], 10);
         newTest.count_mode = count_mode;
        
         uint32_t baud = cStrToUint(newTest_cfg_buff[4], 10);   // Check baud rate
-        newTest.baud = baud;
+        newTest.baud = (baud_t)baud;
         
         if (baud != SOFTUART0_BAUD) {                         // Temporarily disable interrupts
           if(VERBOSE) {
@@ -165,17 +180,20 @@ void loop() {
             Serial.println(baud);
             Serial.println();  
           } 
-          SoftSerial.begin(newTest.baud);            // Reconfigure the slave at the new requested baud rate
+          SoftSerial.begin((uint32_t)newTest.baud);            // Reconfigure the slave at the new requested baud rate
+          Serial.println("DUT baud rate updated.\n");
         }
-        
+
         uint16_t transaction_delay_ms = cStrToUint(newTest_cfg_buff[5], 10); // Check transaction delay
         newTest.transaction_delay_ms  = transaction_delay_ms;
 
         // Data is (very likely) valid by virtue of checksum alone; has been validated on master end prior to sending
         newTestState = TEST_READY;
-        //signifySoftUART_DONE();                     // Kick an interrupt back to the master indicating that configuration is complete 
-        //signifySoftUART_NOT_DONE();
-        printTestConfig(&newTest);
+        printTestConfig(&newTest);                  // Print out the local copy of the test config for local verification
+        signifySoftUART_DONE();                     // Kick an interrupt back to the master indicating that configuration is complete 
+        signifySoftUART_NOT_DONE();
+        Serial.println("Ready to begin test.");
+        break;
         //delay(3000);
       }
 
@@ -195,25 +213,33 @@ void loop() {
          Serial.println(COMMON_DATA_FORMAT_EXAMPLE);
       }
     }
-    
+    else {
+      Serial.println("No bytes received.\n");
+    }
   }
   // When done, signal to master via UART_done that we're initialized for the test, at which point, the master will initiate the test by generating an interrupt on the RTS input pin
-  sprintf(buff, "%d", count); // will use hardcoded data or a running count for the data
+  //sprintf(buff, "%d", count); // will use hardcoded data or a running count for the data
   // Wait for master to signify we are ready to send more data by driving this pin high
-  signifySoftUART_DONE();
-  newTestState = TEST_RUNNING;
+  //interruptOccurred = false;
   
-  while (newTestState == TEST_RUNNING) {
+  while (newTestState == TEST_RUNNING || newTestState == TEST_READY) {
+    signifySoftUART_DONE();
     while (!interruptOccurred) {}; // wait for an interrupt to occur
     signifySoftUART_NOT_DONE();
-    // This grouping of print statements does not transmit the null char. Each data value is terminated with LF (0xA)
-    SoftSerial.print(buff);
-    SoftSerial.print('\n');
-    toggleHeartbeat();
-    count++;
     interruptOccurred = false;  // rst the isr flag
-    sprintf(buff, "%d", count); // Update the count value 
-    signifySoftUART_DONE();
+    // This grouping of print statements does not transmit the null char. Each data value is terminated with LF (0xA)
+    //SoftSerial.print("XXXXXXXX");
+    //SoftSerial.print("1234567");
+    //for (size_t i = 0; i < newTest.data_len_bytes; i++) {
+    //SoftSerial.write(newTest.data, newTest.data_len_bytes - 1);
+    //}
+    //SoftSerial.print('\n'); // necessary in current build to send newline
+    app_serial_print_bytes(newTest.data, newTest.data_len_bytes);
+    toggleHeartbeat();
+    //count++;
+    //sprintf(buff, "%d", count); // Update the count value 
+    delay(newTest.transaction_delay_ms);
+    //signifySoftUART_DONE();
   }
 }
 
@@ -331,7 +357,8 @@ void uIntArrayToCStr(uint8_t * input_data, char * output_ascii, size_t data_size
     }
     temp[data_size] = '\0'; // Null-terminate the string
     //strncpy(temp, output_ascii, strlen(temp)); // Update the const char *
-    output_ascii = temp;
+    //output_ascii = temp;
+    strcpy(output_ascii, temp);
 }
 
 // ============================================================================================================================= //
@@ -352,17 +379,12 @@ void initializeConfig(uart_test_cfg_t * cfg) {
     cfg->data_len_bytes = 0;
     cfg->count_mode = 0;
     cfg->data = nullptr; // Initialize data array to an empty string
-    cfg->baud = 0;
+    cfg->baud = (baud_t)0;
     cfg->transaction_delay_ms = 0;
 }
 
 // ============================================================================================================================= //
 void printTestConfig(uart_test_cfg_t * cfg) {
-    char buff[sizeof(uint32_t) + 1];
-    if (!Serial) {
-      Serial.println("ERROR: Serial object not initialized!"); // ? how do you expect to print to the console upon this error occurring in runtime?
-      return;
-    }
     Serial.println("======== Test Configuration ========");
     Serial.print("Duration               : ");
     Serial.println(cfg->duration);
@@ -372,8 +394,16 @@ void printTestConfig(uart_test_cfg_t * cfg) {
     Serial.println(cfg->count_mode);
     // KNOWN ISSUE: IMPORPER STRING TERMINATION FOR BUFF HERE, RESULTING IN ODD PRINTS TO CONSOLE. BUT DATA LOOKS OK 
     Serial.print("Transaction data       : ");
-    uIntArrayToCStr(cfg->data, buff, cfg->data_len_bytes);
-    Serial.println(buff);
+    //uIntArrayToCStr(cfg->data, buff, cfg->data_len_bytes);
+    Serial.print("[");
+    for (size_t i = 0; i < cfg->data_len_bytes; i++) {
+        Serial.print((char)(cfg->data[i]));
+        if (i < cfg->data_len_bytes - 1) {
+            Serial.print(", ");
+        }
+    }
+    Serial.println("]");
+    //Serial.println(buff);
     Serial.print("Baud rate              : ");
     Serial.println(cfg->baud);
     Serial.print("Transaction delay (ms) : ");
@@ -382,11 +412,11 @@ void printTestConfig(uart_test_cfg_t * cfg) {
 }
 
 // ============================================================================================================================= //
-void app_serial_read(SoftwareSerial * objHandle, char * buff, uint8_t msg_len) {
+void app_serial_read(char * buff, uint8_t msg_len) {
   uint8_t num_bytes = 0;
   char c;
   while(num_bytes < msg_len) {
-      c = objHandle->read();
+      c = SoftSerial.read();
       if (c == '\n' || c == '\r') {  // Check for line feed or carriage return
           break;
       }
@@ -400,5 +430,12 @@ void app_serial_read(SoftwareSerial * objHandle, char * buff, uint8_t msg_len) {
 void app_serial_buffer_console(uint8_t numColumns, const char delim) {
   for(int i = 0; i < numColumns; i++) {
     Serial.print(delim);
+  }
+}
+
+// ============================================================================================================================= //
+void app_serial_print_bytes(uint8_t bytes[], uint8_t numBytes) {
+  for(int i = 0; i < numBytes; i++) {
+    SoftSerial.write(bytes[i]);
   }
 }
